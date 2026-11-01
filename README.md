@@ -17,3 +17,24 @@ Bibliotecas Nativas Utilizadas (Não precisam ser instaladas, já vêm no Python
 ​asyncio (Rotinas assíncronas do MCP)
 ​urllib.request (Comunicação HTTP ultra-leve com Groq e OpenAI)
 ​subprocess (O motor que dá vida à ferramenta de rodar comandos no shell)
+
+
+
+
+ git clone https://github.com/snaidermadilus-debug/mcp-ai-agent.git
+ cd mcp-ai-agent
+
+
+
+
+
+
+
+
+
+
+
+<a href="https://github.com/snaidermadilus-debug/mcp-ai-agent/archive/refs/heads/main.zip"
+   download>
+    📦 Baixar MCP Server
+</a>
