@@ -38,3 +38,13 @@ Bibliotecas Nativas Utilizadas (Não precisam ser instaladas, já vêm no Python
    download>
     📦 Baixar MCP Server
 </a>
+
+
+
+
+
+
+
+
+Crie conta em https://console.groq.com/keys
+Crie API Key
