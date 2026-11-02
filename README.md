@@ -369,9 +369,6 @@ mcp-ai-agent/
 └── README.md
     └── Documentação
 
-«⚠️ Nunca publique sua API Key no GitHub.»
-
-O arquivo de configuração local pode conter credenciais dependendo de como o projeto foi configurado. As chaves devem ser tratadas como senhas e não devem ser commitadas no repositório. A própria documentação do Gemini recomenda não colocar API Keys no código-fonte ou controle de versão.
 
 ---
 
