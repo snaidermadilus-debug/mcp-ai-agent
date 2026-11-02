@@ -175,10 +175,6 @@ Essa seleção já existe no "chat.py".
 
 🟢 Gemini — Google
 
-Criar uma conta Google
-
-👉 "Criar conta Google" (https://accounts.google.com/signup)
-
 Se você já possui uma conta Google, não precisa criar outra.
 
 Criar sua API Key do Gemini
