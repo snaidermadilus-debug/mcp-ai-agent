@@ -437,10 +437,6 @@ Cole sua API Key e comece a usar.
 
 👉 https://github.com/snaidermadilus-debug/mcp-ai-agent
 
-🟢 Google
-
-👉 https://accounts.google.com/signup
-
 🧠 Google AI Studio / Gemini
 
 👉 https://aistudio.google.com/
