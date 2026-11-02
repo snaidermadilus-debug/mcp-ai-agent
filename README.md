@@ -9,7 +9,7 @@ de Inteligência Artificial para ler arquivos, programar e rodar
 ​
   Comando de instalação:
 
-(`'python -m pip install google-genai rich mcp``)
+ "python -m pip install google-genai rich mcp
 
 
 Bibliotecas Nativas Utilizadas (Não precisam ser instaladas, já vêm no Python):
