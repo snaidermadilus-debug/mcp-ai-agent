@@ -1,0 +1,8 @@
+{
+  "name": "TuxAssist Web MCP Agent",
+  "description": "AI Agent with MCP (Model Context Protocol) integration for file browsing, file reading, terminal command execution, and multi-provider LLM support (Gemini, Groq, OpenAI).",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ],
+  "permissions": []
+}
