@@ -63,6 +63,125 @@ export default function App() {
   const [toolResult, setToolResult] = useState<string>('');
   const [testingTool, setTestingTool] = useState(false);
 
+  // Home Workspace State
+  const [homeModalOpen, setHomeModalOpen] = useState(false);
+  const [currentWorkspaceDir, setCurrentWorkspaceDir] = useState('');
+  const [newWorkspaceDirInput, setNewWorkspaceDirInput] = useState('');
+  const [homeResultMsg, setHomeResultMsg] = useState('');
+  const [homeResultError, setHomeResultError] = useState('');
+  const [loadingConfig, setLoadingConfig] = useState(false);
+
+  const fetchConfig = async () => {
+    try {
+      const res = await fetch('/api/config');
+      const data = await res.json();
+      if (data.activeWorkspaceDir) {
+        setCurrentWorkspaceDir(data.activeWorkspaceDir);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleSaveWorkspaceHome = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newWorkspaceDirInput.trim()) return;
+
+    setHomeResultMsg('');
+    setHomeResultError('');
+    setLoadingConfig(true);
+
+    try {
+      const res = await fetch('/api/config/home', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace_dir: newWorkspaceDirInput.trim() })
+      });
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        setCurrentWorkspaceDir(data.activeWorkspaceDir);
+        setHomeResultMsg(data.message);
+        fetchFiles();
+        setTimeout(() => {
+          setHomeModalOpen(false);
+        }, 3000);
+      } else {
+        setHomeResultError(data.error || 'Erro ao atualizar diretório.');
+      }
+    } catch (e: any) {
+      setHomeResultError(`Erro de conexão: ${e.message}`);
+    } finally {
+      setLoadingConfig(false);
+    }
+  };
+
+  // Security Confirmation Modal State
+  const [pendingConfirmation, setPendingConfirmation] = useState<{
+    command: string;
+    riskLevel: number;
+    reason: string;
+    source: 'terminal' | 'tool' | 'chat';
+    callback: (confirmed: boolean) => void;
+  } | null>(null);
+  const [confirmInput, setConfirmInput] = useState('');
+  const [confirmError, setConfirmError] = useState('');
+
+  const handleConfirmChoice = (choice: string) => {
+    const clean = choice.trim().toLowerCase();
+    if (['y', 'yes', 's', 'sim'].includes(clean)) {
+      setConfirmError('');
+      const cb = pendingConfirmation?.callback;
+      setPendingConfirmation(null);
+      setConfirmInput('');
+      if (cb) cb(true);
+    } else if (['n', 'no', 'não', 'nao'].includes(clean)) {
+      setConfirmError('');
+      const cb = pendingConfirmation?.callback;
+      setPendingConfirmation(null);
+      setConfirmInput('');
+      if (cb) cb(false);
+    } else {
+      setConfirmError('Entrada inválida. Digite y, s ou sim para autorizar, ou n, não para cancelar.');
+    }
+  };
+
+  useEffect(() => {
+    if (messages.length === 0) return;
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg.steps && lastMsg.steps.length > 0) {
+      for (const step of lastMsg.steps) {
+        if (step.result && step.result.includes('[CONFIRMATION_REQUIRED')) {
+          const match = step.result.match(/\[CONFIRMATION_REQUIRED:(\d+):(.*?):(.*?)]/);
+          if (match) {
+            const riskLevel = parseInt(match[1], 10);
+            const cmd = decodeURIComponent(match[2]);
+            const reason = decodeURIComponent(match[3]);
+            
+            if (!pendingConfirmation || pendingConfirmation.command !== cmd) {
+              setPendingConfirmation({
+                command: cmd,
+                riskLevel,
+                reason,
+                source: 'chat',
+                callback: async (isConfirmed) => {
+                  if (isConfirmed) {
+                    setInputMessage(`Executar comando confirmado: ${cmd}`);
+                  } else {
+                    setMessages(prev => [...prev, {
+                      role: 'assistant',
+                      content: `❌ Operação cancelada pelo usuário para o comando: \`${cmd}\``
+                    }]);
+                  }
+                }
+              });
+            }
+          }
+        }
+      }
+    }
+  }, [messages]);
+
   useEffect(() => {
     localStorage.setItem('tux_provider', provider);
     localStorage.setItem('tux_apikey', apiKey);
@@ -76,6 +195,7 @@ export default function App() {
   useEffect(() => {
     fetchFiles();
     fetchTools();
+    fetchConfig();
   }, []);
 
   const fetchFiles = async () => {
@@ -111,6 +231,16 @@ export default function App() {
     if (!inputMessage.trim() || isThinking) return;
 
     const userText = inputMessage.trim();
+    if (userText === '/home' || userText.toLowerCase() === '/home') {
+      setInputMessage('');
+      fetchConfig();
+      setNewWorkspaceDirInput(currentWorkspaceDir);
+      setHomeResultMsg('');
+      setHomeResultError('');
+      setHomeModalOpen(true);
+      return;
+    }
+
     setInputMessage('');
     const newMessages: Message[] = [...messages, { role: 'user', content: userText }];
     setMessages(newMessages);
@@ -167,21 +297,59 @@ export default function App() {
   const runTerminalCommand = async (cmdToRun?: string) => {
     const cmd = cmdToRun || termCommand;
     if (!cmd.trim() || termRunning) return;
-    setTermRunning(true);
     if (!cmdToRun) setTermCommand('');
+    executeCmdWithCheck(cmd, false, 'terminal');
+  };
 
+  const executeCmdWithCheck = async (cmd: string, confirmed: boolean, source: 'terminal' | 'tool' | 'chat') => {
+    if (source === 'terminal') setTermRunning(true);
+    if (source === 'tool') setTestingTool(true);
     try {
       const res = await fetch('/api/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: cmd })
+        body: JSON.stringify({ command: cmd, confirmed })
       });
       const data = await res.json();
-      setTermHistory(prev => [...prev, { cmd, output: data.output || '(sem saída)' }]);
+      
+      if (res.status === 403 && data.requiresConfirmation) {
+        setPendingConfirmation({
+          command: data.command,
+          riskLevel: data.riskLevel,
+          reason: data.reason,
+          source,
+          callback: (isConfirmed) => {
+            if (isConfirmed) {
+              executeCmdWithCheck(cmd, true, source);
+            } else {
+              if (source === 'terminal') {
+                setTermHistory(prev => [...prev, { cmd, output: '❌ Operação cancelada pelo usuário (recusada).' }]);
+              } else if (source === 'tool') {
+                setToolResult('❌ Operação cancelada pelo usuário (recusada).');
+              }
+            }
+          }
+        });
+        if (source === 'terminal') setTermRunning(false);
+        if (source === 'tool') setTestingTool(false);
+        return;
+      }
+
+      if (source === 'terminal') {
+        setTermHistory(prev => [...prev, { cmd, output: data.output || data.error || '(sem saída)' }]);
+      } else if (source === 'tool') {
+        setToolResult(data.output || data.error || '(sem saída)');
+      }
     } catch (e: any) {
-      setTermHistory(prev => [...prev, { cmd, output: `Erro: ${e.message}` }]);
+      const errOut = `Erro: ${e.message}`;
+      if (source === 'terminal') {
+        setTermHistory(prev => [...prev, { cmd, output: errOut }]);
+      } else if (source === 'tool') {
+        setToolResult(errOut);
+      }
     } finally {
-      setTermRunning(false);
+      if (source === 'terminal') setTermRunning(false);
+      if (source === 'tool') setTestingTool(false);
     }
   };
 
@@ -198,12 +366,12 @@ export default function App() {
         return;
       }
 
-      // Simulate via execute or file endpoints
       let res;
       if (selectedTool === 'listar_arquivos') {
         res = await fetch('/api/files');
         const data = await res.json();
         setToolResult(JSON.stringify(data.files, null, 2));
+        setTestingTool(false);
       } else if (selectedTool === 'ler_arquivo') {
         res = await fetch('/api/files/read', {
           method: 'POST',
@@ -212,14 +380,15 @@ export default function App() {
         });
         const data = await res.json();
         setToolResult(data.content || data.error || 'Erro');
+        setTestingTool(false);
       } else if (selectedTool === 'executar_comando') {
-        res = await fetch('/api/execute', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(parsedArgs)
-        });
-        const data = await res.json();
-        setToolResult(data.output);
+        const cmd = (parsedArgs as any).comando;
+        if (!cmd) {
+          setToolResult('Erro: comando não especificado.');
+          setTestingTool(false);
+          return;
+        }
+        executeCmdWithCheck(cmd, false, 'tool');
       } else {
         res = await fetch('/api/execute', {
           method: 'POST',
@@ -228,10 +397,10 @@ export default function App() {
         });
         const data = await res.json();
         setToolResult(data.output);
+        setTestingTool(false);
       }
     } catch (e: any) {
       setToolResult(`Erro: ${e.message}`);
-    } finally {
       setTestingTool(false);
     }
   };
@@ -301,6 +470,20 @@ export default function App() {
             >
               <Wrench className="w-4 h-4" />
               <span>Ferramentas MCP</span>
+            </button>
+
+            <button
+              onClick={() => {
+                fetchConfig();
+                setNewWorkspaceDirInput(currentWorkspaceDir);
+                setHomeResultMsg('');
+                setHomeResultError('');
+                setHomeModalOpen(true);
+              }}
+              className="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors"
+            >
+              <FolderOpen className="w-4 h-4 text-amber-500" />
+              <span>Configurar /home</span>
             </button>
 
             <button
@@ -690,6 +873,146 @@ export default function App() {
         )}
 
       </div>
+
+      {/* Security Confirmation Modal */}
+      {pendingConfirmation && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl animate-in fade-in zoom-in duration-200">
+            <div className="flex items-center space-x-3 text-amber-500">
+              <ShieldAlert className="w-6 h-6" />
+              <h3 className="text-lg font-bold text-zinc-100">⚠️ CONFIRMAÇÃO DE SEGURANÇA</h3>
+            </div>
+            
+            <div className="space-y-3 text-sm text-zinc-300">
+              <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 space-y-2">
+                <div><span className="text-zinc-500 text-xs">Comando:</span></div>
+                <div className="font-mono text-xs text-emerald-400 bg-zinc-900 p-2 rounded border border-zinc-800/80 overflow-x-auto">
+                  {pendingConfirmation.command}
+                </div>
+                <div className="flex justify-between items-center text-xs pt-1">
+                  <span className="text-zinc-400">Nível de risco:</span>
+                  <span className="px-2 py-0.5 rounded font-bold bg-amber-500/20 text-amber-400 border border-amber-500/35">
+                    Nível {pendingConfirmation.riskLevel} ({pendingConfirmation.reason})
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-zinc-400 block mb-1">Deseja permitir?</label>
+                <div className="flex gap-2 mb-3">
+                  <button
+                    onClick={() => handleConfirmChoice('y')}
+                    className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-2.5 rounded-xl font-medium text-xs flex items-center justify-center gap-1.5 transition-colors shadow-lg"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>[y] Sim, executar</span>
+                  </button>
+                  <button
+                    onClick={() => handleConfirmChoice('n')}
+                    className="flex-1 bg-red-600/80 hover:bg-red-600 text-white py-2.5 rounded-xl font-medium text-xs flex items-center justify-center gap-1.5 transition-colors shadow-lg"
+                  >
+                    <AlertCircle className="w-4 h-4" />
+                    <span>[n] Não, cancelar</span>
+                  </button>
+                </div>
+                
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-400 font-mono">Sua escolha:</span>
+                  <input
+                    type="text"
+                    value={confirmInput}
+                    onChange={(e) => setConfirmInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleConfirmChoice(confirmInput)}
+                    placeholder="Digite y, s, sim, n, não..."
+                    className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono text-zinc-100 focus:outline-none focus:border-[#d97757]"
+                    autoFocus
+                  />
+                  <button
+                    onClick={() => handleConfirmChoice(confirmInput)}
+                    className="bg-[#d97757] hover:bg-[#c26749] text-white px-4 py-2 rounded-lg text-xs font-medium transition-colors"
+                  >
+                    Confirmar
+                  </button>
+                </div>
+                {confirmError && (
+                  <p className="text-xs text-red-400 mt-2 bg-red-950/40 p-2 rounded border border-red-900/50">{confirmError}</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* /home Configuration Modal */}
+      {homeModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl animate-in fade-in zoom-in duration-200 font-mono">
+            
+            <div className="text-center space-y-1 bg-zinc-950 p-3 rounded-xl border border-zinc-800">
+              <div className="text-zinc-500 text-xs">╭──────────────────────────────────────────────╮</div>
+              <div className="text-zinc-100 font-bold text-sm tracking-wider">CONFIGURAR DIRETÓRIO PADRÃO</div>
+              <div className="text-zinc-500 text-xs">╰──────────────────────────────────────────────╯</div>
+            </div>
+
+            <div className="space-y-4 text-xs text-zinc-300">
+              <div>
+                <span className="text-zinc-400 block mb-1">Diretório atual:</span>
+                <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800 text-emerald-400 break-all">
+                  {currentWorkspaceDir || 'Carregando...'}
+                </div>
+              </div>
+
+              <form onSubmit={handleSaveWorkspaceHome} className="space-y-3">
+                <div>
+                  <label className="text-zinc-400 block mb-1">Digite o novo diretório:</label>
+                  <div className="flex items-center bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-zinc-100 focus-within:border-[#d97757]">
+                    <span className="text-[#d97757] font-bold mr-2">&gt;</span>
+                    <input
+                      type="text"
+                      value={newWorkspaceDirInput}
+                      onChange={(e) => setNewWorkspaceDirInput(e.target.value)}
+                      placeholder="/data/data/com.termux/files/home ou /caminho/absoluto..."
+                      className="w-full bg-transparent border-none text-xs text-zinc-100 focus:outline-none"
+                      autoFocus
+                    />
+                  </div>
+                </div>
+
+                {homeResultMsg && (
+                  <div className="bg-emerald-950/40 border border-emerald-900/50 p-3 rounded-xl text-emerald-300 whitespace-pre-wrap leading-relaxed">
+                    {homeResultMsg}
+                  </div>
+                )}
+
+                {homeResultError && (
+                  <div className="bg-red-950/40 border border-red-900/50 p-3 rounded-xl text-red-300 whitespace-pre-wrap leading-relaxed">
+                    {homeResultError}
+                  </div>
+                )}
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="submit"
+                    disabled={loadingConfig || !newWorkspaceDirInput.trim()}
+                    className="flex-1 bg-[#d97757] hover:bg-[#c26749] disabled:opacity-50 text-white py-2.5 rounded-xl font-medium text-xs flex items-center justify-center gap-1.5 transition-colors shadow-lg"
+                  >
+                    <span>Salvar & Aplicar</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHomeModalOpen(false)}
+                    className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-5 py-2.5 rounded-xl font-medium text-xs transition-colors"
+                  >
+                    Fechar
+                  </button>
+                </div>
+              </form>
+            </div>
+
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
