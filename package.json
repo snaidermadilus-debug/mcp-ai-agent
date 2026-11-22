@@ -1,36 +1,14 @@
 {
-  "name": "tuxassist-web",
+  "name": "tuxassist",
   "private": true,
   "version": "1.0.0",
-  "type": "module",
+  "description": "TuxAssist — AI Agent with MCP (Model Context Protocol) integration in Python",
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build",
-    "start": "node server.ts",
-    "lint": "tsc --noEmit"
+    "dev": "python chat.py",
+    "build": "python -m unittest test_tuxassist.py",
+    "start": "python chat.py",
+    "lint": "python -m py_compile chat.py servidor_mcp.py security.py config.py test_tuxassist.py"
   },
-  "dependencies": {
-    "@google/genai": "^3.6.1",
-    "clsx": "^2.1.1",
-    "cors": "^2.8.6",
-    "dotenv": "^18.0.10",
-    "express": "^5.3.0",
-    "lucide-react": "^1.77.0",
-    "react": "^19.3.1",
-    "react-dom": "^19.3.1",
-    "tailwind-merge": "^3.7.1"
-  },
-  "devDependencies": {
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "4.3.4",
-    "autoprefixer": "^10.7.0",
-    "postcss": "^8.5.33",
-    "tailwindcss": "^4.3.5",
-    "tsx": "^4.23.15",
-    "typescript": "^7.0.2",
-    "vite": "5.4.11"
-  }
+  "dependencies": {},
+  "devDependencies": {}
 }
