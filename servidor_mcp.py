@@ -6,13 +6,9 @@ import sys
 try:
     from mcp.server.mcpserver import MCPServer
 except ImportError:
-    class MCPServer:
-        def __init__(self, name):
-            self.name = name
-        def tool(self):
-            return lambda func: func
-        def run(self):
-            pass
+    print("❌ Erro Crítico: O pacote 'mcp' (Model Context Protocol) não está instalado ou é incompatível.", file=sys.stderr)
+    print("   Instale as dependências executando: python3 -m pip install -r requirements.txt", file=sys.stderr)
+    sys.exit(1)
 
 from security import validate_path, check_file_size, is_binary_file, validate_command
 

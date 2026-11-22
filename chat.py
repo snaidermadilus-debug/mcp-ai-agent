@@ -5,8 +5,11 @@ import shutil
 import asyncio
 import time
 import random
+import email.utils
+import datetime
 import urllib.request
 import urllib.error
+import socket
 
 try:
     from mcp.client.stdio import stdio_client, StdioServerParameters
@@ -58,7 +61,7 @@ except ImportError:
 from config import carregar_config, salvar_config, mascarar_chave, MAX_HISTORY_MESSAGES, LIMITE_TOKENS_FERRAMENTA
 from security import validate_command
 
-# Independent provider loading (graceful degradation if google-genai is missing and user selects Groq/OpenAI)
+# Independent provider loading (graceful degradation if google-genai is missing)
 GEMINI_DISPONIVEL = False
 try:
     from google import genai
@@ -98,6 +101,24 @@ def limitar_texto(texto, limite=LIMITE_TOKENS_FERRAMENTA):
         return texto
     cortado = len(texto) - limite
     return texto[:limite] + f"\n\n[...saída cortada, {cortado} caracteres omitidos...]"
+
+def compactar_historico(messages, max_msgs=MAX_HISTORY_MESSAGES):
+    """Compacta o histórico preservando a integridade de tool_calls e tool responses."""
+    if len(messages) <= max_msgs:
+        return messages
+    
+    system_msg = messages[0] if messages and messages[0].get('role') == 'system' else None
+    start_idx = 1 if system_msg else 0
+    
+    recent_msgs = messages[start_idx:]
+    
+    while len(recent_msgs) > (max_msgs - (1 if system_msg else 0)):
+        removed = recent_msgs.pop(0)
+        if removed.get('tool_calls'):
+            while recent_msgs and recent_msgs[0].get('role') == 'tool':
+                recent_msgs.pop(0)
+
+    return ([system_msg] if system_msg else []) + recent_msgs
 
 def banner(provedor=None, modelo=None):
     linhas = f"Bem-vindo ao TuxAssist\n\n/mu trocar IA · /clear limpar · /ls listar · !cmd rodar · /sair"
@@ -187,33 +208,66 @@ def setup_ia(config, mudar_agora=False):
 
     return provedor, api_key, modelo
 
-def chamar_api_com_retry(url, headers, payload, max_retries=3):
-    """Executa requisição HTTP com retry, backoff exponencial, jitter e tratamento de erro HTTP."""
+async def chamar_api_com_retry(url, headers, payload, max_retries=3, timeout=30):
+    """Executa requisição HTTP assíncrona com timeout, tratamento de erros 400/401/403/404/429/5xx, backoff exponencial, jitter e Retry-After."""
     tentativa = 0
     while tentativa < max_retries:
         try:
-            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
-            with urllib.request.urlopen(req) as response:
-                return json.loads(response.read().decode('utf-8'))
+            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+            
+            def _do_request():
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    data = response.read(10 * 1024 * 1024)
+                    return json.loads(data.decode('utf-8'))
+
+            return await asyncio.to_thread(_do_request)
+
         except urllib.error.HTTPError as he:
             code = he.code
             err_body = he.read().decode('utf-8', errors='replace')
+            
+            if code == 400:
+                raise RuntimeError(f"Erro HTTP 400 (Bad Request): {err_body}")
+            if code == 401:
+                raise RuntimeError(f"Erro HTTP 401 (Unauthorized - API Key inválida ou expirada): {err_body}")
+            if code == 403:
+                raise RuntimeError(f"Erro HTTP 403 (Forbidden): {err_body}")
+            if code == 404:
+                raise RuntimeError(f"Erro HTTP 404 (Not Found): {err_body}")
+            
             if code in [429, 500, 502, 503, 504]:
                 tentativa += 1
                 if tentativa >= max_retries:
                     raise RuntimeError(f"Erro HTTP {code} após {max_retries} tentativas: {err_body}")
                 
-                retry_after = he.headers.get("Retry-After")
-                sleep_time = float(retry_after) if retry_after and retry_after.isdigit() else (2 ** tentativa) + random.uniform(0, 1)
-                time.sleep(sleep_time)
+                retry_after_header = he.headers.get("Retry-After")
+                sleep_time = None
+                if retry_after_header:
+                    if retry_after_header.isdigit():
+                        sleep_time = float(retry_after_header)
+                    else:
+                        try:
+                            dt = email.utils.parsedate_to_datetime(retry_after_header)
+                            if dt:
+                                delta = (dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+                                sleep_time = max(0.0, delta)
+                        except Exception:
+                            pass
+                
+                if sleep_time is None:
+                    sleep_time = (2 ** tentativa) + random.uniform(0, 1)
+                
+                await asyncio.sleep(sleep_time)
                 continue
             else:
                 raise RuntimeError(f"Erro HTTP ({code}): {err_body}")
-        except urllib.error.URLError as ue:
+
+        except (urllib.error.URLError, socket.gaierror, TimeoutError, ConnectionResetError) as ue:
             tentativa += 1
             if tentativa >= max_retries:
-                raise RuntimeError(f"Falha de conexão com a API: {ue.reason}")
-            time.sleep((2 ** tentativa) + random.uniform(0, 1))
+                raise RuntimeError(f"Falha de conexão ou timeout após {max_retries} tentativas: {ue}")
+            await asyncio.sleep((2 ** tentativa) + random.uniform(0, 1))
+    
     raise RuntimeError("Falha na comunicação com a API após tentativas máximas.")
 
 async def pedir_entrada():
@@ -304,6 +358,7 @@ async def main():
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 mcp_tools = await session.list_tools()
+                valid_tool_names = {t.name for t in mcp_tools.tools}
 
                 gemini_tools = [{"function_declarations": [
                     {"name": t.name, "description": t.description, "parameters": t.input_schema}
@@ -391,18 +446,26 @@ async def main():
 
                     try:
                         if provedor == "gemini":
-                            response = motor_ia.send_message(user_input)
+                            response = await asyncio.to_thread(motor_ia.send_message, user_input)
                             it = 0
                             while response.function_calls and it < max_iterations:
                                 it += 1
+                                if it >= max_iterations:
+                                    console.print("[yellow]⚠️ Limite máximo de iterações de ferramentas atingido (5). Parando execução para evitar loops infinitos.[/yellow]")
+                                    break
+
                                 respostas_das_ferramentas = []
                                 for fc in response.function_calls:
-                                    mostrar_ferramenta(fc.name, fc.args)
-                                    try:
-                                        resultado_mcp = await session.call_tool(fc.name, arguments=fc.args)
-                                        texto_resultado = resultado_mcp.content[0].text
-                                    except Exception as erro_mcp:
-                                        texto_resultado = f"Erro na ferramenta MCP: {erro_mcp}"
+                                    if fc.name not in valid_tool_names:
+                                        texto_resultado = f"Erro: Ferramenta '{fc.name}' não existe."
+                                    else:
+                                        mostrar_ferramenta(fc.name, fc.args)
+                                        try:
+                                            args_dict = dict(fc.args) if fc.args else {}
+                                            resultado_mcp = await session.call_tool(fc.name, arguments=args_dict)
+                                            texto_resultado = resultado_mcp.content[0].text if resultado_mcp.content else "Sem resultado."
+                                        except Exception as erro_mcp:
+                                            texto_resultado = f"Erro na execução da ferramenta MCP: {erro_mcp}"
                                     
                                     mostrar_resultado(texto_resultado)
                                     respostas_das_ferramentas.append(
@@ -411,13 +474,12 @@ async def main():
                                             response={"result": limitar_texto(texto_resultado)}
                                         )
                                     )
-                                response = await motor_ia.send_message(respostas_das_ferramentas)
+                                response = await asyncio.to_thread(motor_ia.send_message, respostas_das_ferramentas)
                             texto_final = response.text or "Sem resposta."
 
                         else:
                             motor_ia.append({"role": "user", "content": user_input})
-                            if len(motor_ia) > MAX_HISTORY_MESSAGES:
-                                motor_ia = [motor_ia[0]] + motor_ia[-(MAX_HISTORY_MESSAGES-1):]
+                            motor_ia = compactar_historico(motor_ia)
 
                             url = "https://api.groq.com/openai/v1/chat/completions" if provedor == "groq" else "https://api.openai.com/v1/chat/completions"
                             headers = {
@@ -427,24 +489,31 @@ async def main():
                             }
                             payload = {"model": modelo, "messages": motor_ia, "tools": openai_tools, "tool_choice": "auto"}
 
-                            resposta_json = chamar_api_com_retry(url, headers, payload)
+                            resposta_json = await chamar_api_com_retry(url, headers, payload)
                             msg = resposta_json["choices"][0]["message"]
 
                             it = 0
                             while msg.get("tool_calls") and it < max_iterations:
                                 it += 1
+                                if it >= max_iterations:
+                                    console.print("[yellow]⚠️ Limite máximo de iterações de ferramentas atingido (5). Parando execução para evitar loops infinitos.[/yellow]")
+                                    break
+
                                 motor_ia.append(msg)
                                 for fc in msg["tool_calls"]:
                                     f_name = fc["function"]["name"]
                                     f_args_str = fc["function"]["arguments"]
-                                    mostrar_ferramenta(f_name, f_args_str)
 
-                                    try:
-                                        args = json.loads(f_args_str)
-                                        resultado_mcp = await session.call_tool(f_name, arguments=args)
-                                        texto_resultado = resultado_mcp.content[0].text
-                                    except Exception as erro_mcp:
-                                        texto_resultado = f"Erro na ferramenta MCP: {erro_mcp}"
+                                    if f_name not in valid_tool_names:
+                                        texto_resultado = f"Erro: Ferramenta '{f_name}' não existe."
+                                    else:
+                                        mostrar_ferramenta(f_name, f_args_str)
+                                        try:
+                                            args = json.loads(f_args_str) if f_args_str else {}
+                                            resultado_mcp = await session.call_tool(f_name, arguments=args)
+                                            texto_resultado = resultado_mcp.content[0].text if resultado_mcp.content else "Sem resultado."
+                                        except Exception as erro_mcp:
+                                            texto_resultado = f"Erro na execução da ferramenta MCP: {erro_mcp}"
 
                                     mostrar_resultado(texto_resultado)
 
@@ -456,7 +525,7 @@ async def main():
                                     })
 
                                 payload["messages"] = motor_ia
-                                resposta_json = chamar_api_com_retry(url, headers, payload)
+                                resposta_json = await chamar_api_com_retry(url, headers, payload)
                                 msg = resposta_json["choices"][0]["message"]
 
                             texto_final = msg.get("content", "")
